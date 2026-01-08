@@ -3,340 +3,273 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
-from datetime import datetime, timedelta
 import google.generativeai as genai
 import requests
 import time
 import random
 
 # ===========================
-# 1. 基礎設定
+# 1. 手機版面設定
 # ===========================
 
-st.set_page_config(page_title="ProTrader 專業操盤室", layout="wide", initial_sidebar_state="expanded")
-st.title("🖥️ ProTrader 專業操盤室 (批次慢速版)")
-st.markdown("---")
+st.set_page_config(
+    page_title="ProTrader Mobile", 
+    layout="centered", # 手機版建議用 centered 比較聚焦
+    initial_sidebar_state="collapsed" # 預設收起側邊欄，讓主畫面更大
+)
 
-# 讀取 Google Gemini Key
+st.title("📱 ProTrader 操盤室")
+st.caption("AI 驅動・台美股智慧分析")
+
+# ===========================
+# 2. 模型自動修復機制
+# ===========================
+
+# 讀取 Key
 try:
     google_api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=google_api_key)
-    # 使用 Flash 模型速度較快且省額度
-    model = genai.GenerativeModel('gemini-1.5-flash')
     llm_available = True
-except Exception:
+except:
     llm_available = False
 
-if "watch_list" not in st.session_state:
-    st.session_state.watch_list = []
+def get_gemini_response(prompt):
+    """
+    自動嘗試不同模型，解決 404 問題
+    """
+    if not llm_available: return "⚠️ 請先設定 API Key"
+    
+    # 優先嘗試 Flash (快且新)
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception:
+        # 如果失敗 (404)，改用 Pro (舊版穩定)
+        try:
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"AI 分析暫時無法使用 ({str(e)[:20]}...)"
 
 # ===========================
-# 2. 核心函數 (抗封鎖強化版)
+# 3. 核心函數
 # ===========================
+
+def get_ticker_symbol(input_str):
+    """智慧判斷台美股"""
+    input_str = input_str.strip().upper()
+    # 如果全是數字 (如 2330)，認定為台股
+    if input_str.isdigit():
+        return f"{input_str}.TW", "TW"
+    # 否則認定為美股 (如 AAPL, TSLA)
+    return input_str, "US"
 
 def fetch_data_robust(ticker):
-    """強韌型數據抓取"""
     max_retries = 3
     for i in range(max_retries):
         try:
-            # 每次抓取前隨機休息，模擬人類行為
-            time.sleep(random.uniform(1.0, 3.0))
-            
+            time.sleep(random.uniform(0.5, 1.5)) # 隨機休息防封鎖
             df = yf.download(ticker, period="1y", progress=False)
             
-            # 修復 MultiIndex 問題
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df = df.loc[:, ~df.columns.duplicated()]
 
             if not df.empty and 'Close' in df.columns:
                 return df
-        except Exception as e:
-            print(f"Retrying {ticker}... ({e})")
+        except:
             continue
     return None
 
-def fetch_news_robust(ticker):
+def fetch_news(ticker):
     try:
-        # 抓新聞前也稍微休息一下
-        time.sleep(random.uniform(0.5, 1.0))
         t = yf.Ticker(ticker)
         return t.news
     except:
         return []
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_market_status(market_type):
-    ticker = "SPY" if market_type == "美股 (US)" else "0050.TW"
-    name = "標普500" if market_type == "美股 (US)" else "台灣50"
-    
-    # 大盤是獨立請求，不要影響到下面的個股 loop，所以這裡不需加太長延遲
-    df = fetch_data_robust(ticker)
-    
-    if df is None or len(df) < 60:
-        return name, "數據連線中", "grey"
-        
-    df['MA20'] = df['Close'].rolling(20).mean()
-    df['MA60'] = df['Close'].rolling(60).mean()
-    last = df.iloc[-1]
-    
-    if last['Close'] > last['MA60'] and last['MA20'] > last['MA60']:
-        return name, "多頭格局 (安全)", "green"
-    elif last['Close'] < last['MA60']:
-        return name, "空頭修正 (危險)", "red"
-    else:
-        return name, "震盪整理 (觀望)", "yellow"
-
-def process_stock_data(ticker, market):
-    """處理單一個股數據"""
-    ticker = ticker.upper().strip()
-    # 台股後綴處理
-    if market == "台股 (TW)" and not ticker.endswith(".TW") and ticker.isdigit():
-        ticker = f"{ticker}.TW"
-        
-    df = fetch_data_robust(ticker)
-    
-    if df is None or df.empty or 'Close' not in df.columns:
-        return None, None, None, ticker
-
-    try:
-        df['MA20'] = df['Close'].rolling(20).mean()
-        df['MA60'] = df['Close'].rolling(60).mean()
-    except:
-        return None, None, None, ticker
-    
-    try:
-        df_recent = df.tail(120).copy()
-        if not df_recent.empty:
-            bins = pd.cut(df_recent['Close'], bins=30)
-            vol_profile = df_recent.groupby(bins, observed=False)['Volume'].sum()
-        else:
-            vol_profile = None
-    except:
-        vol_profile = None
-        
-    news = fetch_news_robust(ticker)
-    return df, news, vol_profile, ticker
-
-def calculate_score(df):
-    if len(df) < 60: return 50
+def calculate_technical_score(df):
+    if len(df) < 60: return 50, "資料不足"
     score = 50
-    try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        if pd.isna(last['MA20']) or pd.isna(last['MA60']): return 50
-
-        # 趨勢
-        if last['MA20'] > last['MA60'] and last['Close'] > last['MA20']: score += 25
-        elif last['Close'] < last['MA60']: score -= 25
-        # 支撐
-        if last['Close'] > last['MA20']: score += 10
-        # 量能
-        vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
-        if last['Volume'] > vol_ma5 * 1.5 and last['Close'] > prev['Close']: score += 15
-    except:
-        pass
-    return min(100, max(0, score))
-
-def analyze_ai(news_list, ticker):
-    """Gemini 分析 (加入 Ticker 參數讓回答更精確)"""
-    if not news_list or not llm_available:
-        return "⚠️ 無法執行 AI 分析 (無新聞或 API Key)"
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # 1. 均線趨勢
+    if last['MA20'] > last['MA60'] and last['Close'] > last['MA20']:
+        score += 25 # 多頭排列
+    elif last['Close'] < last['MA60']:
+        score -= 25 # 空頭
         
+    # 2. 短線支撐
+    if last['Close'] > last['MA20']: score += 10
+    
+    # 3. 量能爆發
+    vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
+    if vol_ma5 > 0 and (last['Volume'] / vol_ma5) > 1.5:
+        score += 15
+        
+    final_score = min(100, max(0, score))
+    
+    # 簡易趨勢標籤
+    if final_score >= 75: trend = "🔥 強力多頭"
+    elif final_score >= 60: trend = "📈 偏多震盪"
+    elif final_score <= 40: trend = "📉 偏空修正"
+    else: trend = "⚖️ 盤整觀望"
+    
+    return final_score, trend
+
+def analyze_ai_summary(news_list, ticker, trend_tag):
+    if not news_list: return "無近期新聞可供分析。"
+    
     headlines = [f"- {n.get('title')}" for n in news_list[:5]]
     txt = "\n".join(headlines)
     
     prompt = f"""
-    你是一位專業操盤手。請根據以下 {ticker} 的新聞標題，給出「三句話」總結：
-    1. 市場情緒 (偏多/偏空)
-    2. 核心原因
-    3. 操作建議
+    你是一位手機看盤 App 的 AI 助手。
+    分析標的：{ticker} (目前技術面狀態：{trend_tag})
     
-    新聞標題：
+    請根據新聞標題，給出「手機易讀」的結論 (總字數 100 字內)：
+    1. 【一句話結論】：(利多/利空/中性) + 核心原因。
+    2. 【操作建議】：(簡短建議，如拉回買進、觀望、停損)。
+    
+    新聞：
     {txt}
     """
-    try:
-        # 呼叫 AI 前也稍微休息，避免觸發 Gemini 的 RPM 限制
-        time.sleep(1)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Gemini 分析錯誤: {e}"
+    return get_gemini_response(prompt)
 
 def generate_indicator_report(df, vol_profile):
     if len(df) < 60: return []
     last = df.iloc[-1]
-    prev = df.iloc[-2]
     
-    # 指標邏輯 (簡化版)
-    ma20_status = "✅ 股價在月線之上" if last['Close'] > last['MA20'] else "🔻 股價跌破月線"
-    ma60_status = "✅ 股價在季線之上" if last['Close'] > last['MA60'] else "🔻 股價跌破季線"
-    
+    # 產生簡短的手機版指標報告
     bias = ((last['Close'] - last['MA20']) / last['MA20']) * 100
-    if bias > 15: bias_status = "⚠️ 正乖離過大"
-    elif bias < -15: bias_status = "⚡ 負乖離過大"
-    else: bias_status = "👌 乖離率正常"
     
-    vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
-    vol_ratio = last['Volume'] / vol_ma5 if vol_ma5 > 0 else 0
-    if vol_ratio > 1.5: vol_status = "🔥 爆量"
-    elif vol_ratio < 0.6: vol_status = "💤 量縮"
-    else: vol_status = "⚖️ 溫和"
+    vp_price = vol_profile.idxmax().mid if vol_profile is not None else 0
+    vp_status = "支撐" if last['Close'] > vp_price else "壓力"
     
-    vp_status = "無資料"
-    if vol_profile is not None:
-        max_price = vol_profile.idxmax().mid
-        if last['Close'] > max_price: vp_status = f"🧱 支撐 ({max_price:.1f})"
-        else: vp_status = f"🔨 壓力 ({max_price:.1f})"
-
     return [
-        {"指標": "MA20 (月線)", "數值": f"{last['MA20']:.2f}", "狀態": ma20_status},
-        {"指標": "MA60 (季線)", "數值": f"{last['MA60']:.2f}", "狀態": ma60_status},
-        {"指標": "乖離率", "數值": f"{bias:.2f}%", "狀態": bias_status},
-        {"指標": "量能", "數值": f"{int(last['Volume']):,}", "狀態": vol_status},
-        {"指標": "籌碼大量區", "數值": f"{max_price:.2f}" if vol_profile is not None else "-", "狀態": vp_status},
+        {"指標": "季線 (生命線)", "數值": f"{last['MA60']:.1f}", "狀態": "✅ 在之上" if last['Close'] > last['MA60'] else "❌ 跌破"},
+        {"指標": "月線乖離", "數值": f"{bias:.1f}%", "狀態": "⚠️ 過熱" if bias > 15 else ("⚡ 超跌" if bias < -15 else "👌 正常")},
+        {"指標": "籌碼大量區", "數值": f"{vp_price:.1f}", "狀態": f"{vp_status}"},
     ]
 
 # ===========================
-# 3. UI 操作區
+# 4. 手機版 UI 邏輯
 # ===========================
 
-# --- 側邊欄輸入 ---
-st.sidebar.header("🔍 股票搜尋")
-m_type = st.sidebar.radio("市場", ["美股 (US)", "台股 (TW)"])
+# 將輸入框移到最上方，方便手機操作
+input_container = st.container()
+with input_container:
+    # 支援逗號分隔多檔
+    raw_input = st.text_input("輸入代號 (自動辨識台美股，支援多檔)", 
+                              placeholder="例: 2330, NVDA, 2317", 
+                              value="").strip()
+    
+    start_btn = st.button("🚀 開始分析", type="primary", use_container_width=True)
 
-# 修改輸入框提示，支援多檔
-t_input_str = st.sidebar.text_area("輸入代號 (支援多檔，用逗號分隔)\n例如: 2330, 2317, 2454", value="2330").strip()
-btn = st.sidebar.button("開始批次分析", type="primary")
-
-# --- 主畫面：大盤狀態 ---
-name, status, color = get_market_status(m_type)
-if color == "green": st.success(f"**{name}**：{status}")
-elif color == "red": st.error(f"**{name}**：{status}")
-else: st.warning(f"**{name}**：{status}")
-
-# --- 主畫面：個股分析邏輯 ---
-if btn and t_input_str:
-    # 1. 解析輸入代號
-    # 把逗號、換行都換成逗號，然後切割
-    raw_tickers = t_input_str.replace("\n", ",").split(",")
-    target_tickers = [t.strip() for t in raw_tickers if t.strip()]
+if start_btn and raw_input:
+    tickers = [t.strip() for t in raw_input.replace("，", ",").split(",") if t.strip()]
     
-    # 建立一個容器來存放這批次的結果
-    batch_results = []
+    results_for_ranking = []
     
-    # 建立進度條
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    total_tickers = len(target_tickers)
-    
-    # 2. 開始迴圈處理
-    for idx, ticker in enumerate(target_tickers):
-        # 更新進度
-        progress_bar.progress((idx) / total_tickers)
-        status_text.markdown(f"### ⏳ 正在分析：**{ticker}** ({idx+1}/{total_tickers})... 請稍候")
+    # 使用 st.status 取代進度條，手機上看更乾淨
+    with st.status("🔍 AI 正在掃描市場數據...", expanded=True) as status:
         
-        # === 關鍵：強制休息 ===
-        # 第一支不用休太久，後面的每支隨機休 3~8 秒
-        if idx > 0:
-            sleep_time = random.uniform(3, 8)
-            time.sleep(sleep_time) 
-        
-        # 執行分析
-        df, news, vol, final_t = process_stock_data(ticker, m_type)
-        
-        if df is not None:
-            last = df.iloc[-1]
-            score = calculate_score(df)
+        for idx, t_str in enumerate(tickers):
+            # 1. 轉換代號 (智慧判斷)
+            real_ticker, market_loc = get_ticker_symbol(t_str)
+            status.write(f"正在分析 ({idx+1}/{len(tickers)}): **{real_ticker}** ...")
             
-            # === 顯示單一個股結果 (使用 expander 收納，避免畫面太長) ===
-            # 預設展開第一支，後面的收起來
-            with st.expander(f"📊 {final_t} - 評分: {score}", expanded=(idx==0)):
-                c1, c2 = st.columns([2, 1])
-                with c1:
-                    st.metric("股價", f"{last['Close']:.2f}", f"{(last['Close']-df.iloc[-2]['Close']):.2f}")
-                with c2:
-                    st.progress(score)
-                    st.caption(f"操盤評分: {score}")
-
-                # 圖表
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'))
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='green', width=2), name='MA60'))
-                if vol is not None:
-                    try:
-                        mp = vol.idxmax().mid
-                        fig.add_hline(y=mp, line_dash="dot", line_color="red")
-                    except: pass
-                fig.update_layout(height=350, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=0,r=0,t=10,b=0))
-                st.plotly_chart(fig, use_container_width=True)
+            # 2. 抓取數據
+            df = fetch_data_robust(real_ticker)
+            
+            if df is not None:
+                # 計算指標
+                df['MA20'] = df['Close'].rolling(20).mean()
+                df['MA60'] = df['Close'].rolling(60).mean()
                 
-                # 指標表
-                report = generate_indicator_report(df, vol)
-                st.dataframe(pd.DataFrame(report), hide_index=True, use_container_width=True)
+                # 計算籌碼大量區
+                try:
+                    df_recent = df.tail(120).copy()
+                    bins = pd.cut(df_recent['Close'], bins=30)
+                    vol_profile = df_recent.groupby(bins, observed=False)['Volume'].sum()
+                except: vol_profile = None
+                
+                # 評分與趨勢
+                score, trend_tag = calculate_technical_score(df)
+                last_price = df['Close'].iloc[-1]
+                change = last_price - df['Close'].iloc[-2]
+                change_pct = (change / df['Close'].iloc[-2]) * 100
+                
+                # 抓新聞與 AI 分析
+                news = fetch_news(real_ticker)
+                ai_comment = analyze_ai_summary(news, real_ticker, trend_tag)
+                
+                # === 手機版卡片顯示 (Card View) ===
+                st.markdown("---") # 分隔線
+                
+                # A. 標題區 (大字體)
+                col_head1, col_head2 = st.columns([1.5, 1])
+                with col_head1:
+                    st.markdown(f"### **{t_str.upper()}**")
+                    st.caption(f"{market_loc} Market")
+                with col_head2:
+                    color = "red" if change > 0 else "green" # 台股紅漲綠跌邏輯(可自調)
+                    st.markdown(f"<h3 style='color:{color}; text-align:right;'>{last_price:.2f}</h3>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='color:{color}; text-align:right; margin-top:-15px;'>{change:+.2f} ({change_pct:+.1f}%)</p>", unsafe_allow_html=True)
 
-                # AI 分析
-                if news and llm_available:
-                    st.info(analyze_ai(news, final_t))
+                # B. 結論區 (最優先顯示)
+                st.info(f"**{trend_tag} (評分: {score})**\n\n🤖 **AI 觀點**：\n{ai_comment}")
 
-            # 收集結果供最後排行使用
-            batch_results.append({
-                "代號": final_t,
-                "股價": float(f"{last['Close']:.2f}"),
-                "評分": score,
-                "趨勢": "多頭" if score >= 70 else "空頭" if score <= 30 else "盤整"
-            })
-            
-            # 更新 Session History (選用，避免重複)
-            if not any(d['Ticker'] == final_t for d in st.session_state.watch_list):
-                 st.session_state.watch_list.append({'Ticker': final_t, 'Score': score, 'Price': float(last['Close'])})
-        else:
-            st.error(f"❌ {ticker} 分析失敗 (可能代號錯誤或無數據)")
+                # C. 細節區 (Expander 收納)
+                with st.expander("📊 點擊查看 K線圖與詳細指標"):
+                    # 1. K線圖
+                    fig = go.Figure()
+                    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K'))
+                    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'))
+                    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='green', width=1), name='MA60'))
+                    fig.update_layout(
+                        height=300, # 手機版圖表高度縮小
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        xaxis_rangeslider_visible=False, 
+                        template="plotly_dark"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 2. 指標表格
+                    st.markdown("##### 關鍵指標診斷")
+                    report = generate_indicator_report(df, vol_profile)
+                    st.table(pd.DataFrame(report)) # 手機上用 table 比 dataframe 更好讀
 
-    # 3. 迴圈結束，顯示最終排行
-    progress_bar.progress(1.0)
-    status_text.success("✅ 全部分析完成！")
-    
-    if batch_results:
+                # 收集資料做排行
+                results_for_ranking.append({
+                    "代號": t_str.upper(),
+                    "評分": score,
+                    "現價": last_price,
+                    "趨勢": trend_tag
+                })
+                
+            else:
+                st.error(f"❌ 無法讀取 {t_str}")
+        
+        status.update(label="✅ 所有分析完成！", state="complete", expanded=False)
+
+    # === 最終排行榜 (手機版優化) ===
+    if results_for_ranking:
         st.markdown("---")
-        st.header("🏆 本次投資建議排名")
-        st.markdown("根據操盤評分系統，針對您輸入的個股進行強弱排序：")
+        st.subheader("🏆 投資潛力排行")
         
-        # 轉成 DataFrame 並排序
-        df_rank = pd.DataFrame(batch_results).sort_values(by="評分", ascending=False).reset_index(drop=True)
+        # 排序
+        df_rank = pd.DataFrame(results_for_ranking).sort_values("評分", ascending=False).reset_index(drop=True)
         
-        # 調整顯示格式
-        st.dataframe(
-            df_rank,
-            use_container_width=True,
-            column_config={
-                "評分": st.column_config.ProgressColumn(
-                    "操盤評分 (越高越好)",
-                    format="%d",
-                    min_value=0,
-                    max_value=100,
-                ),
-                "股價": st.column_config.NumberColumn(
-                    "現價",
-                    format="$ %.2f"
-                )
-            }
-        )
+        # 使用簡單表格顯示，避免手機橫向捲動
+        st.table(df_rank[["代號", "評分", "趨勢"]])
         
-        # 找出最強的一檔給予建議
-        top_stock = df_rank.iloc[0]
-        st.info(f"💡 **最佳首選**：**{top_stock['代號']}** (評分 {top_stock['評分']})。在您輸入的這批名單中，它的技術面結構最強。")
+        top = df_rank.iloc[0]
+        st.success(f"💡 **首選建議：{top['代號']}**\n\n目前技術面最強 ({top['趨勢']})，建議優先關注。")
 
-# ===========================
-# 4. 側邊欄排行榜 (歷史紀錄)
-# ===========================
-if st.session_state.watch_list:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📜 歷史查詢紀錄")
-    hist_df = pd.DataFrame(st.session_state.watch_list).sort_values("Score", ascending=False)
-    st.sidebar.dataframe(hist_df[['Ticker', 'Score']], hide_index=True, use_container_width=True)
-    if st.sidebar.button("清除歷史"):
-        st.session_state.watch_list = []
-        st.rerun()
+# 頁尾墊高，避免手機操作被底部遮擋
+st.write("\n\n")
+st.caption("ProTrader Mobile v3.0 | Designed for iPhone")
