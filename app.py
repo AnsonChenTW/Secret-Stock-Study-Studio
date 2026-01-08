@@ -10,11 +10,11 @@ import time
 import random
 
 # ===========================
-# 1. 基礎設定與 API 初始化
+# 1. 基礎設定
 # ===========================
 
 st.set_page_config(page_title="ProTrader 專業操盤室", layout="wide", initial_sidebar_state="expanded")
-st.title("🖥️ ProTrader 專業操盤室 (Robust Ver.)")
+st.title("🖥️ ProTrader 專業操盤室 (v2.0)")
 st.markdown("---")
 
 # 讀取 OpenAI Key
@@ -29,55 +29,36 @@ if "watch_list" not in st.session_state:
     st.session_state.watch_list = []
 
 # ===========================
-# 2. 抗封鎖核心函數 (已修復格式錯誤)
+# 2. 核心函數
 # ===========================
 
 def get_random_agent():
-    """隨機產生 User-Agent"""
     agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
     ]
     return random.choice(agents)
 
 def fetch_data_robust(ticker):
-    """
-    強韌型數據抓取：
-    1. 包含重試機制
-    2. 強制處理 MultiIndex 問題 (修復 ValueError 的關鍵)
-    """
+    """強韌型數據抓取"""
     max_retries = 3
     for i in range(max_retries):
         try:
-            # 隨機延遲
-            time.sleep(random.uniform(0.5, 1.5))
-            
-            # 使用 yf.download
+            time.sleep(random.uniform(0.1, 0.5))
             df = yf.download(ticker, period="1y", progress=False)
             
-            # === 關鍵修復：扁平化 MultiIndex ===
-            # 如果欄位是多層的 (例如: ('Close', 'AAPL'))，把它變成單層 ('Close')
+            # 修復 MultiIndex 問題
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            
-            # 移除重複欄位 (有時候 yfinance 會回傳重複的 Close)
             df = df.loc[:, ~df.columns.duplicated()]
 
-            # 檢查是否有數據
             if not df.empty and 'Close' in df.columns:
                 return df
-                
-        except Exception as e:
-            if i == max_retries - 1:
-                print(f"Failed to fetch {ticker}: {e}")
-                return None
+        except Exception:
             continue
     return None
 
 def fetch_news_robust(ticker):
-    """獨立抓取新聞"""
     try:
         t = yf.Ticker(ticker)
         return t.news
@@ -86,14 +67,12 @@ def fetch_news_robust(ticker):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_market_status(market_type):
-    """大盤紅綠燈"""
     ticker = "SPY" if market_type == "美股 (US)" else "0050.TW"
     name = "標普500" if market_type == "美股 (US)" else "台灣50"
-    
     df = fetch_data_robust(ticker)
     
     if df is None or len(df) < 60:
-        return name, "數據連線中斷", "grey"
+        return name, "數據連線中", "grey"
         
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
@@ -108,28 +87,21 @@ def get_market_status(market_type):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def process_stock_data(ticker, market):
-    """處理個股數據與指標"""
     ticker = ticker.upper().strip()
-    # 台股後綴處理
     if market == "台股 (TW)" and not ticker.endswith(".TW") and ticker.isdigit():
         ticker = f"{ticker}.TW"
         
-    # 1. 抓取股價
     df = fetch_data_robust(ticker)
     
-    # 錯誤檢查：如果 df 是 None 或 缺少 Close 欄位
     if df is None or df.empty or 'Close' not in df.columns:
         return None, None, None, ticker
 
-    # 2. 計算指標 (這裡不會再報錯了，因為欄位已經被扁平化)
     try:
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
-    except Exception as e:
-        st.error(f"指標計算錯誤: {e}")
+    except:
         return None, None, None, ticker
     
-    # 3. 計算大量區
     try:
         df_recent = df.tail(120).copy()
         if not df_recent.empty:
@@ -140,56 +112,35 @@ def process_stock_data(ticker, market):
     except:
         vol_profile = None
         
-    # 4. 抓取新聞
     news = fetch_news_robust(ticker)
-    
     return df, news, vol_profile, ticker
 
 def calculate_score(df):
-    """計算操盤分數"""
     if len(df) < 60: return 50
     score = 50
     try:
         last = df.iloc[-1]
         prev = df.iloc[-2]
-        
-        # 確保數據不是 NaN
-        if pd.isna(last['MA20']) or pd.isna(last['MA60']):
-            return 50
+        if pd.isna(last['MA20']) or pd.isna(last['MA60']): return 50
 
         # 趨勢
         if last['MA20'] > last['MA60'] and last['Close'] > last['MA20']: score += 25
         elif last['Close'] < last['MA60']: score -= 25
-        
-        # 短線支撐
+        # 支撐
         if last['Close'] > last['MA20']: score += 10
-        
         # 量能
         vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
-        if last['Volume'] > vol_ma5 * 1.5 and last['Close'] > prev['Close']:
-            score += 15
+        if last['Volume'] > vol_ma5 * 1.5 and last['Close'] > prev['Close']: score += 15
     except:
-        pass # 如果計算出錯，回傳 50 分
-        
+        pass
     return min(100, max(0, score))
 
 def analyze_ai(news_list):
-    """OpenAI 新聞分析"""
     if not news_list or not llm_available:
-        return "⚠️ 無法執行 AI 分析 (無新聞資料或 API Key)"
-        
+        return "⚠️ 無法執行 AI 分析 (無新聞或 API Key)"
     headlines = [f"- {n.get('title')}" for n in news_list[:5]]
     txt = "\n".join(headlines)
-    
-    prompt = f"""
-    你是一位專業操盤手。請根據以下新聞標題，給出「三句話」總結：
-    1. 市場情緒 (偏多/偏空)
-    2. 核心原因
-    3. 操作建議
-    
-    新聞：
-    {txt}
-    """
+    prompt = f"你是專業操盤手。請根據新聞標題給出三句話總結(情緒/原因/建議)：\n{txt}"
     try:
         res = client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -201,90 +152,103 @@ def analyze_ai(news_list):
         return f"AI 分析錯誤: {e}"
 
 # ===========================
-# 3. UI 介面
+# 3. UI 操作區
 # ===========================
 
-# 側邊欄
+# --- 側邊欄輸入 ---
 st.sidebar.header("🔍 股票搜尋")
 m_type = st.sidebar.radio("市場", ["美股 (US)", "台股 (TW)"])
-t_input = st.sidebar.text_input("輸入代號", "2330").strip()
+t_input = st.sidebar.text_input("輸入代號 (一次一支)", "2330").strip()
 btn = st.sidebar.button("開始分析", type="primary")
 
-# 排行榜
-if st.session_state.watch_list:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🏆 觀察名單")
-    rank_df = pd.DataFrame(st.session_state.watch_list).sort_values("Score", ascending=False)
-    st.sidebar.dataframe(
-        rank_df[['Ticker', 'Score', 'Price']], 
-        hide_index=True, 
-        column_config={"Score": st.column_config.ProgressColumn("分數", max_value=100)}
-    )
-
-# 主畫面 - 大盤
+# --- 主畫面：大盤狀態 ---
 name, status, color = get_market_status(m_type)
 if color == "green": st.success(f"**{name}**：{status}")
 elif color == "red": st.error(f"**{name}**：{status}")
 else: st.warning(f"**{name}**：{status}")
 
-# 主畫面 - 個股
+# --- 主畫面：個股分析邏輯 ---
 if btn and t_input:
-    with st.spinner("🔄 數據連線中 (正在對抗封鎖機制)..."):
+    # 處理輸入：如果使用者不小心輸入了逗號，只取第一個
+    if "," in t_input:
+        st.toast("⚠️ 檢測到多個代號，系統將僅分析第一個。", icon="ℹ️")
+        t_input = t_input.split(",")[0].strip()
+
+    with st.spinner(f"正在分析 {t_input}..."):
         df, news, vol, final_t = process_stock_data(t_input, m_type)
         
     if df is not None:
         last = df.iloc[-1]
         score = calculate_score(df)
         
-        # 顯示頭部資訊
+        # 1. 顯示數據
         c1, c2 = st.columns([2, 1])
         with c1:
             st.header(f"{final_t}")
-            price_change = last['Close'] - df.iloc[-2]['Close']
-            st.metric("股價", f"{last['Close']:.2f}", f"{price_change:.2f}")
+            st.metric("股價", f"{last['Close']:.2f}", f"{(last['Close']-df.iloc[-2]['Close']):.2f}")
         with c2:
             st.write("操盤評分")
             st.progress(score)
             st.caption(f"{score} 分")
             
-        # 畫圖
+        # 2. 顯示圖表
         fig = go.Figure()
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
         fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'))
         fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='green', width=2), name='MA60'))
-        
-        # 大量區線
         if vol is not None:
             try:
                 mp = vol.idxmax().mid
-                fig.add_hline(y=mp, line_dash="dot", line_color="red", annotation_text="大量支撐區")
-            except:
-                pass
-            
-        fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
+                fig.add_hline(y=mp, line_dash="dot", line_color="red", annotation_text="大量區")
+            except: pass
+        fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, use_container_width=True)
         
-        # 下方分析
-        t1, t2 = st.tabs(["數據解讀", "AI 新聞分析"])
-        with t1:
-            col_a, col_b = st.columns(2)
-            bias = ((last['Close'] - last['MA20']) / last['MA20']) * 100
-            col_a.info(f"季線成本: {last['MA60']:.2f} (判斷多空分界)")
-            col_b.warning(f"月線乖離: {bias:.2f}% (過大留意拉回)")
-            
-        with t2:
-            if news:
-                if llm_available:
-                    st.success(analyze_ai(news))
-                for n in news[:3]:
-                    st.markdown(f"- [{n.get('title')}]({n.get('link')})")
+        # 3. AI 分析
+        if news:
+            if llm_available:
+                st.info(analyze_ai(news))
             else:
-                st.info("⚠️ 本次查詢未抓取到新聞 (可能被 Yahoo 暫時阻擋)，但股價數據正常。")
+                st.write("📰 最新消息：")
+                for n in news[:3]: st.markdown(f"- [{n.get('title')}]({n.get('link')})")
 
-        # 更新清單
+        # 4. 更新排行榜資料 (關鍵：先更新 Session State)
         new_data = {'Ticker': final_t, 'Score': score, 'Price': float(last['Close'])}
+        # 移除重複
         st.session_state.watch_list = [x for x in st.session_state.watch_list if x['Ticker'] != final_t]
+        # 加入最新
         st.session_state.watch_list.append(new_data)
         
     else:
-        st.error(f"❌ 無法獲取 {t_input} 數據。Yahoo 伺服器忙碌中，請稍等 1 分鐘後再試。")
+        st.error(f"❌ 找不到 {t_input} 數據，請確認代號正確。")
+
+# ===========================
+# 4. 側邊欄排行榜 (移到最後面渲染)
+# ===========================
+# 這樣確保上面的 watch_list 更新後，這裡能立刻顯示出來
+
+if st.session_state.watch_list:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🏆 觀察名單 (已分析)")
+    
+    # 轉成 DataFrame 並排序
+    rank_df = pd.DataFrame(st.session_state.watch_list).sort_values("Score", ascending=False)
+    
+    # 顯示
+    st.sidebar.dataframe(
+        rank_df[['Ticker', 'Score', 'Price']], 
+        hide_index=True, 
+        column_config={
+            "Score": st.column_config.ProgressColumn("分數", max_value=100, format="%d"),
+            "Price": st.column_config.NumberColumn("現價", format="%.2f")
+        },
+        use_container_width=True
+    )
+    
+    # 清除按鈕
+    if st.sidebar.button("清除清單"):
+        st.session_state.watch_list = []
+        st.rerun()
+else:
+    st.sidebar.markdown("---")
+    st.sidebar.info("尚未分析任何個股。請輸入代號並按「開始分析」，結果將累積於此。")
