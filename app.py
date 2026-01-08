@@ -1,3 +1,8 @@
+# ... import 區塊 ...
+import google.generativeai as genai
+st.warning(f"🔍 目前系統安裝的 Google AI 套件版本：{genai.__version__}")
+# ... 之後原本的程式碼 ...
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
