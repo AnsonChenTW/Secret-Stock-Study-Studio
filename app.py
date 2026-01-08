@@ -14,15 +14,15 @@ import random
 # ===========================
 
 st.set_page_config(page_title="ProTrader 專業操盤室", layout="wide", initial_sidebar_state="expanded")
-st.title("🖥️ ProTrader 專業操盤室 (Gemini Pro 版)")
+st.title("🖥️ ProTrader 專業操盤室 (Gemini 1.5 Flash版)")
 st.markdown("---")
 
 # 讀取 Google Gemini Key
 try:
     google_api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=google_api_key)
-    # 改用 'gemini-pro' (最穩定版本，解決 404 錯誤)
-    model = genai.GenerativeModel('gemini-pro')
+    # 使用目前最穩定且免費的 Flash 模型
+    model = genai.GenerativeModel('gemini-1.5-flash')
     llm_available = True
 except Exception:
     llm_available = False
@@ -33,13 +33,6 @@ if "watch_list" not in st.session_state:
 # ===========================
 # 2. 核心函數
 # ===========================
-
-def get_random_agent():
-    agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
-    ]
-    return random.choice(agents)
 
 def fetch_data_robust(ticker):
     """強韌型數據抓取"""
@@ -138,7 +131,7 @@ def calculate_score(df):
     return min(100, max(0, score))
 
 def analyze_ai(news_list):
-    """Gemini 分析"""
+    """Gemini 1.5 Flash 分析"""
     if not news_list or not llm_available:
         return "⚠️ 無法執行 AI 分析 (無新聞或 API Key)"
         
@@ -158,7 +151,7 @@ def analyze_ai(news_list):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Gemini 分析錯誤: {e}"
+        return f"Gemini 分析錯誤: {e} (請確認 requirements.txt 版本)"
 
 def generate_indicator_report(df, vol_profile):
     """
@@ -170,36 +163,55 @@ def generate_indicator_report(df, vol_profile):
     prev = df.iloc[-2]
     
     # 1. 均線分析
-    ma20_status = "股價在月線之上 (短多)" if last['Close'] > last['MA20'] else "股價在月線之下 (短空)"
-    ma60_status = "股價在季線之上 (長多)" if last['Close'] > last['MA60'] else "股價在季線之下 (長空)"
+    ma20_val = last['MA20']
+    ma60_val = last['MA60']
+    
+    if last['Close'] > ma20_val:
+        ma20_status = "✅ 股價在月線之上 (短線偏多，有防守)"
+    else:
+        ma20_status = "🔻 股價跌破月線 (短線轉弱，留意修正)"
+        
+    if last['Close'] > ma60_val:
+        ma60_status = "✅ 股價在季線之上 (長線偏多，法人成本支撐)"
+    else:
+        ma60_status = "🔻 股價跌破季線 (長線偏空，上方有套牢壓)"
     
     # 2. 乖離率
-    bias = ((last['Close'] - last['MA20']) / last['MA20']) * 100
-    bias_status = "乖離正常"
-    if bias > 15: bias_status = "正乖離過大 (小心回檔)"
-    elif bias < -15: bias_status = "負乖離過大 (醞釀反彈)"
+    bias = ((last['Close'] - ma20_val) / ma20_val) * 100
+    if bias > 15: bias_status = "⚠️ 正乖離過大 (>15%)，小心獲利回吐"
+    elif bias < -15: bias_status = "⚡ 負乖離過大 (<-15%)，有機會跌深反彈"
+    else: bias_status = "👌 乖離率正常範圍，走勢健康"
     
     # 3. 量能分析
     vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
     vol_ratio = last['Volume'] / vol_ma5 if vol_ma5 > 0 else 0
-    vol_status = f"量能是 5 日均量的 {vol_ratio:.1f} 倍"
-    if vol_ratio > 1.5 and last['Close'] > prev['Close']: vol_status += " (攻擊量)"
-    elif vol_ratio > 1.5 and last['Close'] < prev['Close']: vol_status += " (出貨/殺盤量)"
+    
+    if vol_ratio > 1.5 and last['Close'] > prev['Close']: 
+        vol_status = "🔥 爆量上漲 (攻擊訊號，主力進場)"
+    elif vol_ratio > 1.5 and last['Close'] < prev['Close']: 
+        vol_status = "😱 爆量下跌 (出貨訊號，主力落跑)"
+    elif vol_ratio < 0.6:
+        vol_status = "💤 量縮整理 (市場觀望)"
+    else:
+        vol_status = "⚖️ 量能溫和"
     
     # 4. 籌碼/大量區
-    vp_status = "無大量區資料"
     if vol_profile is not None:
         max_price = vol_profile.idxmax().mid
-        if last['Close'] > max_price: vp_status = f"股價在大量區 ({max_price:.2f}) 之上 -> 支撐"
-        else: vp_status = f"股價在大量區 ({max_price:.2f}) 之下 -> 壓力"
+        if last['Close'] > max_price: 
+            vp_status = f"🧱 股價在大量區 ({max_price:.1f}) 之上 (底部有支撐)"
+        else: 
+            vp_status = f"🔨 股價在大量區 ({max_price:.1f}) 之下 (頭部有壓力)"
+    else:
+        vp_status = "無資料"
 
     # 整合回傳
     report = [
-        {"指標名稱": "MA20 (月線 - 生命線)", "數值": f"{last['MA20']:.2f}", "狀態解讀": ma20_status},
-        {"指標名稱": "MA60 (季線 - 成本線)", "數值": f"{last['MA60']:.2f}", "狀態解讀": ma60_status},
-        {"指標名稱": "月線乖離率 (Bias)", "數值": f"{bias:.2f}%", "狀態解讀": bias_status},
-        {"指標名稱": "成交量能 (Volume)", "數值": f"{int(last['Volume']):,}", "狀態解讀": vol_status},
-        {"指標名稱": "籌碼大量區 (Support/Resist)", "數值": f"約 {max_price:.2f}" if vol_profile is not None else "N/A", "狀態解讀": vp_status},
+        {"指標": "MA20 (月線)", "數值": f"{ma20_val:.2f}", "診斷結果": ma20_status},
+        {"指標": "MA60 (季線)", "數值": f"{ma60_val:.2f}", "診斷結果": ma60_status},
+        {"指標": "月線乖離率", "數值": f"{bias:.2f}%", "診斷結果": bias_status},
+        {"指標": "成交量狀態", "數值": f"{int(last['Volume']):,}", "診斷結果": vol_status},
+        {"指標": "籌碼大量區", "數值": f"約 {max_price:.2f}" if vol_profile is not None else "-", "診斷結果": vp_status},
     ]
     return report
 
@@ -245,8 +257,8 @@ if btn and t_input:
         # 2. 顯示圖表
         fig = go.Figure()
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='green', width=2), name='MA60'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='#FFA500', width=1.5), name='MA20 (月線)'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='#00FF00', width=1.5), name='MA60 (季線)'))
         if vol is not None:
             try:
                 mp = vol.idxmax().mid
@@ -255,8 +267,9 @@ if btn and t_input:
         fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, use_container_width=True)
         
-        # 3. 新增：詳細指標診斷表
+        # 3. 詳細指標診斷表 (新功能)
         st.subheader("📋 策略指標診斷書")
+        st.info("以下為程式使用的 5 大關鍵技術指標，以及該股目前的狀況解讀：")
         report_data = generate_indicator_report(df, vol)
         if report_data:
             st.dataframe(
@@ -264,16 +277,17 @@ if btn and t_input:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "指標名稱": st.column_config.TextColumn("監控指標", width="medium"),
-                    "狀態解讀": st.column_config.TextColumn("操盤手觀點", width="large"),
+                    "指標": st.column_config.TextColumn("監控指標", width="medium"),
+                    "數值": st.column_config.TextColumn("目前數值", width="small"),
+                    "診斷結果": st.column_config.TextColumn("操盤手觀點", width="large"),
                 }
             )
         
         # 4. AI 分析 (Gemini)
-        st.subheader("🤖 AI 新聞觀點 (Gemini Pro)")
+        st.subheader("🤖 AI 新聞觀點 (Gemini 1.5 Flash)")
         if news:
             if llm_available:
-                st.info(analyze_ai(news))
+                st.write(analyze_ai(news))
             else:
                 st.write("📰 最新消息：")
                 for n in news[:3]: st.markdown(f"- [{n.get('title')}]({n.get('link')})")
