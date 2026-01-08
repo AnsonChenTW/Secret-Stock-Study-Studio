@@ -1,0 +1,6 @@
+gradio
+yfinance
+pandas
+requests
+beautifulsoup4
+lxml
