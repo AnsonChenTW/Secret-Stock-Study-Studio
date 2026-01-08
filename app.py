@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime, timedelta
-import openai
+import google.generativeai as genai
 import requests
 import time
 import random
@@ -14,13 +14,15 @@ import random
 # ===========================
 
 st.set_page_config(page_title="ProTrader 專業操盤室", layout="wide", initial_sidebar_state="expanded")
-st.title("🖥️ ProTrader 專業操盤室 (v2.0)")
+st.title("🖥️ ProTrader 專業操盤室 (Gemini版)")
 st.markdown("---")
 
-# 讀取 OpenAI Key
+# 讀取 Google Gemini Key
 try:
-    openai_api_key = st.secrets["OPENAI_API_KEY"]
-    client = openai.OpenAI(api_key=openai_api_key)
+    google_api_key = st.secrets["GOOGLE_API_KEY"]
+    genai.configure(api_key=google_api_key)
+    # 使用免費且強大的 Gemini 1.5 Flash 模型
+    model = genai.GenerativeModel('gemini-1.5-flash')
     llm_available = True
 except Exception:
     llm_available = False
@@ -136,20 +138,28 @@ def calculate_score(df):
     return min(100, max(0, score))
 
 def analyze_ai(news_list):
+    """改用 Google Gemini 進行分析"""
     if not news_list or not llm_available:
         return "⚠️ 無法執行 AI 分析 (無新聞或 API Key)"
+        
     headlines = [f"- {n.get('title')}" for n in news_list[:5]]
     txt = "\n".join(headlines)
-    prompt = f"你是專業操盤手。請根據新聞標題給出三句話總結(情緒/原因/建議)：\n{txt}"
+    
+    prompt = f"""
+    你是一位專業操盤手。請根據以下新聞標題，給出「三句話」總結：
+    1. 市場情緒 (偏多/偏空)
+    2. 核心原因
+    3. 操作建議
+    
+    新聞標題：
+    {txt}
+    """
     try:
-        res = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        return res.choices[0].message.content
+        # 使用 Gemini 生成內容
+        response = model.generate_content(prompt)
+        return response.text
     except Exception as e:
-        return f"AI 分析錯誤: {e}"
+        return f"Gemini 分析錯誤: {e}"
 
 # ===========================
 # 3. UI 操作區
@@ -169,12 +179,11 @@ else: st.warning(f"**{name}**：{status}")
 
 # --- 主畫面：個股分析邏輯 ---
 if btn and t_input:
-    # 處理輸入：如果使用者不小心輸入了逗號，只取第一個
     if "," in t_input:
         st.toast("⚠️ 檢測到多個代號，系統將僅分析第一個。", icon="ℹ️")
         t_input = t_input.split(",")[0].strip()
 
-    with st.spinner(f"正在分析 {t_input}..."):
+    with st.spinner(f"正在分析 {t_input} (Gemini AI 解讀中)..."):
         df, news, vol, final_t = process_stock_data(t_input, m_type)
         
     if df is not None:
@@ -204,7 +213,7 @@ if btn and t_input:
         fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, use_container_width=True)
         
-        # 3. AI 分析
+        # 3. AI 分析 (Gemini)
         if news:
             if llm_available:
                 st.info(analyze_ai(news))
@@ -212,29 +221,24 @@ if btn and t_input:
                 st.write("📰 最新消息：")
                 for n in news[:3]: st.markdown(f"- [{n.get('title')}]({n.get('link')})")
 
-        # 4. 更新排行榜資料 (關鍵：先更新 Session State)
+        # 4. 更新排行榜
         new_data = {'Ticker': final_t, 'Score': score, 'Price': float(last['Close'])}
-        # 移除重複
         st.session_state.watch_list = [x for x in st.session_state.watch_list if x['Ticker'] != final_t]
-        # 加入最新
         st.session_state.watch_list.append(new_data)
         
     else:
         st.error(f"❌ 找不到 {t_input} 數據，請確認代號正確。")
 
 # ===========================
-# 4. 側邊欄排行榜 (移到最後面渲染)
+# 4. 側邊欄排行榜
 # ===========================
-# 這樣確保上面的 watch_list 更新後，這裡能立刻顯示出來
 
 if st.session_state.watch_list:
     st.sidebar.markdown("---")
     st.sidebar.subheader("🏆 觀察名單 (已分析)")
     
-    # 轉成 DataFrame 並排序
     rank_df = pd.DataFrame(st.session_state.watch_list).sort_values("Score", ascending=False)
     
-    # 顯示
     st.sidebar.dataframe(
         rank_df[['Ticker', 'Score', 'Price']], 
         hide_index=True, 
@@ -245,10 +249,9 @@ if st.session_state.watch_list:
         use_container_width=True
     )
     
-    # 清除按鈕
     if st.sidebar.button("清除清單"):
         st.session_state.watch_list = []
         st.rerun()
 else:
     st.sidebar.markdown("---")
-    st.sidebar.info("尚未分析任何個股。請輸入代號並按「開始分析」，結果將累積於此。")
+    st.sidebar.info("尚未分析任何個股。請輸入代號並按「開始分析」。")
