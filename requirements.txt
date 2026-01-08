@@ -3,5 +3,5 @@ yfinance>=0.2.40
 pandas
 plotly
 numpy
-google-generativeai
+google-generativeai>=0.7.0
 requests
