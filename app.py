@@ -14,15 +14,15 @@ import random
 # ===========================
 
 st.set_page_config(page_title="ProTrader 專業操盤室", layout="wide", initial_sidebar_state="expanded")
-st.title("🖥️ ProTrader 專業操盤室 (Gemini版)")
+st.title("🖥️ ProTrader 專業操盤室 (Gemini Pro 版)")
 st.markdown("---")
 
 # 讀取 Google Gemini Key
 try:
     google_api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=google_api_key)
-    # 使用免費且強大的 Gemini 1.5 Flash 模型
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # 改用 'gemini-pro' (最穩定版本，解決 404 錯誤)
+    model = genai.GenerativeModel('gemini-pro')
     llm_available = True
 except Exception:
     llm_available = False
@@ -138,7 +138,7 @@ def calculate_score(df):
     return min(100, max(0, score))
 
 def analyze_ai(news_list):
-    """改用 Google Gemini 進行分析"""
+    """Gemini 分析"""
     if not news_list or not llm_available:
         return "⚠️ 無法執行 AI 分析 (無新聞或 API Key)"
         
@@ -155,11 +155,53 @@ def analyze_ai(news_list):
     {txt}
     """
     try:
-        # 使用 Gemini 生成內容
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
         return f"Gemini 分析錯誤: {e}"
+
+def generate_indicator_report(df, vol_profile):
+    """
+    生成詳細的指標說明報告
+    """
+    if len(df) < 60: return []
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # 1. 均線分析
+    ma20_status = "股價在月線之上 (短多)" if last['Close'] > last['MA20'] else "股價在月線之下 (短空)"
+    ma60_status = "股價在季線之上 (長多)" if last['Close'] > last['MA60'] else "股價在季線之下 (長空)"
+    
+    # 2. 乖離率
+    bias = ((last['Close'] - last['MA20']) / last['MA20']) * 100
+    bias_status = "乖離正常"
+    if bias > 15: bias_status = "正乖離過大 (小心回檔)"
+    elif bias < -15: bias_status = "負乖離過大 (醞釀反彈)"
+    
+    # 3. 量能分析
+    vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
+    vol_ratio = last['Volume'] / vol_ma5 if vol_ma5 > 0 else 0
+    vol_status = f"量能是 5 日均量的 {vol_ratio:.1f} 倍"
+    if vol_ratio > 1.5 and last['Close'] > prev['Close']: vol_status += " (攻擊量)"
+    elif vol_ratio > 1.5 and last['Close'] < prev['Close']: vol_status += " (出貨/殺盤量)"
+    
+    # 4. 籌碼/大量區
+    vp_status = "無大量區資料"
+    if vol_profile is not None:
+        max_price = vol_profile.idxmax().mid
+        if last['Close'] > max_price: vp_status = f"股價在大量區 ({max_price:.2f}) 之上 -> 支撐"
+        else: vp_status = f"股價在大量區 ({max_price:.2f}) 之下 -> 壓力"
+
+    # 整合回傳
+    report = [
+        {"指標名稱": "MA20 (月線 - 生命線)", "數值": f"{last['MA20']:.2f}", "狀態解讀": ma20_status},
+        {"指標名稱": "MA60 (季線 - 成本線)", "數值": f"{last['MA60']:.2f}", "狀態解讀": ma60_status},
+        {"指標名稱": "月線乖離率 (Bias)", "數值": f"{bias:.2f}%", "狀態解讀": bias_status},
+        {"指標名稱": "成交量能 (Volume)", "數值": f"{int(last['Volume']):,}", "狀態解讀": vol_status},
+        {"指標名稱": "籌碼大量區 (Support/Resist)", "數值": f"約 {max_price:.2f}" if vol_profile is not None else "N/A", "狀態解讀": vp_status},
+    ]
+    return report
 
 # ===========================
 # 3. UI 操作區
@@ -213,7 +255,22 @@ if btn and t_input:
         fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, use_container_width=True)
         
-        # 3. AI 分析 (Gemini)
+        # 3. 新增：詳細指標診斷表
+        st.subheader("📋 策略指標診斷書")
+        report_data = generate_indicator_report(df, vol)
+        if report_data:
+            st.dataframe(
+                pd.DataFrame(report_data),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "指標名稱": st.column_config.TextColumn("監控指標", width="medium"),
+                    "狀態解讀": st.column_config.TextColumn("操盤手觀點", width="large"),
+                }
+            )
+        
+        # 4. AI 分析 (Gemini)
+        st.subheader("🤖 AI 新聞觀點 (Gemini Pro)")
         if news:
             if llm_available:
                 st.info(analyze_ai(news))
@@ -221,7 +278,7 @@ if btn and t_input:
                 st.write("📰 最新消息：")
                 for n in news[:3]: st.markdown(f"- [{n.get('title')}]({n.get('link')})")
 
-        # 4. 更新排行榜
+        # 5. 更新排行榜
         new_data = {'Ticker': final_t, 'Score': score, 'Price': float(last['Close'])}
         st.session_state.watch_list = [x for x in st.session_state.watch_list if x['Ticker'] != final_t]
         st.session_state.watch_list.append(new_data)
