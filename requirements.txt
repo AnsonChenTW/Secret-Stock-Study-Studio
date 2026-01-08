@@ -1,6 +1,6 @@
-gradio
+streamlit
 yfinance
 pandas
-requests
-beautifulsoup4
-lxml
+plotly
+numpy
+openai
