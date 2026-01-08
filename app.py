@@ -1,33 +1,41 @@
-# ... import 區塊 ...
-import google.generativeai as genai
-st.warning(f"🔍 目前系統安裝的 Google AI 套件版本：{genai.__version__}")
-# ... 之後原本的程式碼 ...
-
 import streamlit as st
+import google.generativeai as genai
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
-import google.generativeai as genai
 import requests
 import time
 import random
 
 # ===========================
-# 1. 手機版面設定
+# 1. 頁面設定 (必須在所有 st 指令之前)
 # ===========================
-
 st.set_page_config(
     page_title="ProTrader Mobile", 
     layout="centered", 
     initial_sidebar_state="collapsed"
 )
 
+# ===========================
+# 2. 系統診斷 (檢查套件版本)
+# ===========================
+try:
+    # 顯示目前安裝的 Google AI 版本，確認是否更新成功
+    version_info = genai.__version__
+    if version_info < "0.7.0":
+        st.error(f"⚠️ 系統偵測到舊版套件 ({version_info})。AI 功能將無法使用。請在 requirements.txt 指定 google-generativeai>=0.7.0 並重啟 App。")
+    else:
+        # 如果版本正確，顯示一個小小的成功提示 (可隨時移除)
+        st.toast(f"✅ 系統環境正常 (GenAI v{version_info})", icon="🤖")
+except Exception as e:
+    st.warning(f"無法檢測套件版本: {e}")
+
 st.title("📱 ProTrader 操盤室")
 st.caption("AI 驅動・台美股智慧分析")
 
 # ===========================
-# 2. 常用台股代碼對照表
+# 3. 常用台股代碼對照表
 # ===========================
 TW_STOCK_NAMES = {
     "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2303": "聯電", "2308": "台達電",
@@ -41,9 +49,8 @@ TW_STOCK_NAMES = {
 }
 
 # ===========================
-# 3. AI 模型設定 (修復 404 問題)
+# 4. AI 模型設定 (自動切換修復 404)
 # ===========================
-
 try:
     google_api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=google_api_key)
@@ -53,12 +60,11 @@ except:
 
 def get_gemini_response(prompt):
     """
-    自動切換模型，優先使用 Flash，失敗則切換 Pro
-    解決 404 models/gemini-pro not found 問題
+    自動嘗試不同模型，解決 404 問題
     """
     if not llm_available: return "⚠️ 請先設定 Google API Key"
     
-    # 嘗試列表：優先順序
+    # 優先順序：Flash (快) -> Pro 1.5 (強) -> Pro (舊版穩定)
     models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
     
     for model_name in models_to_try:
@@ -67,12 +73,12 @@ def get_gemini_response(prompt):
             response = model.generate_content(prompt)
             return response.text
         except Exception:
-            continue # 失敗就試下一個
+            continue 
             
-    return "⚠️ AI 分析暫時無法使用 (請確認 requirements.txt 已更新至 google-generativeai>=0.7.0)"
+    return "⚠️ AI 暫時無法連線 (可能是 API Key 額度或地區限制)"
 
 # ===========================
-# 4. 核心函數
+# 5. 核心數據函數
 # ===========================
 
 def get_ticker_info(input_str):
@@ -110,12 +116,12 @@ def calculate_technical_score(df):
     score = 50
     last = df.iloc[-1]
     
-    # 均線
+    # 1. 均線趨勢
     if last['MA20'] > last['MA60'] and last['Close'] > last['MA20']: score += 25
     elif last['Close'] < last['MA60']: score -= 25
-    # 支撐
+    # 2. 短線支撐
     if last['Close'] > last['MA20']: score += 10
-    # 量能
+    # 3. 量能
     vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
     if vol_ma5 > 0 and (last['Volume'] / vol_ma5) > 1.5: score += 15
         
@@ -143,21 +149,36 @@ def analyze_ai_summary(news_list, ticker, trend_tag):
 
 def render_indicator_card(title, value, status, explanation):
     """
-    使用 Markdown 渲染卡片，確保手機上自動換行且易讀
+    使用 HTML/CSS 渲染卡片，確保手機上文字自動換行且易讀
     """
-    color = "green" if "✅" in status or "👌" in status else "red" if "❌" in status or "⚠️" in status else "orange"
-    
+    # 根據狀態決定顏色
+    if "✅" in status or "👌" in status or "🧱" in status:
+        border_color = "#4CAF50" # Green
+    elif "❌" in status or "⚠️" in status or "🔨" in status or "⚡" in status:
+        border_color = "#FF5252" # Red
+    else:
+        border_color = "#FFC107" # Yellow/Orange
+
     st.markdown(f"""
-    <div style="background-color: #262730; padding: 15px; border-radius: 10px; margin-bottom: 10px; border-left: 5px solid {color};">
-        <h4 style="margin:0; color: #fafafa;">{title} <span style="float:right; color:{color}">{value}</span></h4>
-        <p style="margin:5px 0 5px 0; font-weight:bold; color:{color}">{status}</p>
-        <p style="margin:0; font-size: 0.9em; color: #cccccc; line-height: 1.5;">💡 {explanation}</p>
+    <div style="
+        background-color: #262730; 
+        padding: 15px; 
+        border-radius: 10px; 
+        margin-bottom: 12px; 
+        border-left: 5px solid {border_color};
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+            <span style="font-size: 1.1em; font-weight: bold; color: #fafafa;">{title}</span>
+            <span style="font-size: 1.1em; font-weight: bold; color: {border_color};">{value}</span>
+        </div>
+        <div style="font-weight: bold; color: {border_color}; margin-bottom: 5px;">{status}</div>
+        <div style="font-size: 0.9em; color: #dddddd; line-height: 1.5;">💡 {explanation}</div>
     </div>
     """, unsafe_allow_html=True)
 
 def generate_educational_report(df, vol_profile):
     """
-    生成「帶入數值」的新手教學報告
+    生成「帶入數值」的白話文教學
     """
     if len(df) < 60: return
     last = df.iloc[-1]
@@ -167,44 +188,42 @@ def generate_educational_report(df, vol_profile):
     # 1. 季線教學
     if price > ma60:
         status_ma = "✅ 站上季線 (多頭)"
-        desc_ma = f"目前股價 {price:.1f} 高於季線 {ma60:.1f}。季線是法人三個月的平均成本，股價在上面，代表主力都賺錢，趨勢偏多。"
+        desc_ma = f"目前股價 {price:.1f} 高於季線 {ma60:.1f}。季線是長期的生命線，股價穩在上面，代表長期趨勢健康，主力還在顧。"
     else:
         status_ma = "❌ 跌破季線 (空頭)"
-        desc_ma = f"目前股價 {price:.1f} 低於季線 {ma60:.1f}。代表過去三個月買進的人平均都賠錢，季線變成上方的「蓋頭反壓」。"
+        desc_ma = f"目前股價 {price:.1f} 低於季線 {ma60:.1f}。季線變成上方的「蓋頭反壓」，代表過去一季買的人都賠錢，容易有賣壓。"
     render_indicator_card("季線 (生命線)", f"{ma60:.1f}", status_ma, desc_ma)
 
     # 2. 乖離率教學
     bias = ((price - last['MA20']) / last['MA20']) * 100
     if bias > 15:
         status_bias = "⚠️ 過熱 (正乖離大)"
-        desc_bias = f"目前乖離率 {bias:.1f}%，超過正常值 +15%。這代表股價衝太快，像橡皮筋拉太緊，隨時可能回檔修正，不要追高。"
+        desc_bias = f"目前乖離率 {bias:.1f}%，超過 +15%。股價衝太快了，像橡皮筋拉太緊，隨時可能回檔，千萬別追高。"
     elif bias < -15:
         status_bias = "⚡ 超跌 (負乖離大)"
-        desc_bias = f"目前乖離率 {bias:.1f}%，低於 -15%。代表股價跌太深，像皮球壓到底，短線容易出現反彈。"
+        desc_bias = f"目前乖離率 {bias:.1f}%，低於 -15%。股價跌太深了，像皮球壓到底，短線有機會反彈。"
     else:
         status_bias = "👌 正常範圍"
-        desc_bias = f"目前乖離率 {bias:.1f}%，位於 -15% ~ +15% 的安全區間。股價走勢穩健，沒有失控。"
+        desc_bias = f"目前乖離率 {bias:.1f}%，位於安全區間。股價走勢穩健，沒有失控暴漲或暴跌。"
     render_indicator_card("月線乖離率", f"{bias:.1f}%", status_bias, desc_bias)
 
     # 3. 籌碼教學
     vp_price = vol_profile.idxmax().mid if vol_profile is not None else 0
     if price > vp_price:
         status_vp = "🧱 下檔有支撐"
-        desc_vp = f"股價({price:.1f}) 在大量成交區({vp_price:.0f}) 之上。代表這個價位很多人買過且賺錢，跌回來他們會想再買，形成地板。"
+        desc_vp = f"股價({price:.1f}) 在大量成交區({vp_price:.0f}) 之上。這個價位是地板，跌回來會有人想買，形成防守。"
     else:
         status_vp = "🔨 上檔有壓力"
-        desc_vp = f"股價({price:.1f}) 在大量成交區({vp_price:.0f}) 之下。代表這個價位很多人被套牢(賠錢)，漲上去他們會想解套賣出，形成鍋蓋。"
+        desc_vp = f"股價({price:.1f}) 在大量成交區({vp_price:.0f}) 之下。這個價位是天花板，漲上去會遇到解套賣壓，難以突破。"
     render_indicator_card("籌碼大量區", f"{vp_price:.1f}", status_vp, desc_vp)
 
 # ===========================
-# 5. UI 邏輯
+# 6. UI 主畫面
 # ===========================
 
 input_container = st.container()
 with input_container:
-    raw_input = st.text_input("輸入代號 (自動辨識台美股，支援多檔)", 
-                              placeholder="例: 2330, NVDA, 2317", 
-                              value="").strip()
+    raw_input = st.text_input("輸入代號 (支援多檔，如: 2330, NVDA)", value="").strip()
     start_btn = st.button("🚀 開始分析", type="primary", use_container_width=True)
 
 if start_btn and raw_input:
@@ -216,6 +235,7 @@ if start_btn and raw_input:
         for idx, t_str in enumerate(tickers):
             real_ticker, display_name, market_loc = get_ticker_info(t_str)
             status.write(f"正在分析 ({idx+1}/{len(tickers)}): **{display_name}** ...")
+            
             df = fetch_data_robust(real_ticker)
             
             if df is not None:
@@ -238,20 +258,20 @@ if start_btn and raw_input:
                 # === 卡片顯示區 ===
                 st.markdown("---")
                 
-                # 標題區
+                # A. 標題與價格
                 c1, c2 = st.columns([1.8, 1])
                 with c1:
                     st.markdown(f"### **{display_name}**")
                     st.caption(f"{market_loc} Market")
                 with c2:
-                    color = "red" if change > 0 else "green"
+                    color = "#FF5252" if change > 0 else "#4CAF50" # 台股紅漲綠跌
                     st.markdown(f"<h3 style='color:{color}; text-align:right;'>{last_price:.2f}</h3>", unsafe_allow_html=True)
                     st.markdown(f"<p style='color:{color}; text-align:right; margin-top:-15px;'>{change:+.2f} ({change_pct:+.1f}%)</p>", unsafe_allow_html=True)
 
-                # AI 結論區
+                # B. 結論
                 st.info(f"**{trend_tag} (評分: {score})**\n\n🤖 **AI 觀點**：\n{ai_comment}")
 
-                # K線圖
+                # C. K線圖
                 st.markdown("##### 📊 K線結構")
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K'))
@@ -260,7 +280,7 @@ if start_btn and raw_input:
                 fig.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # 新手教學指標區 (取代原本的表格)
+                # D. 新手教學診斷 (卡片式)
                 st.markdown("##### 🩺 關鍵指標診斷書")
                 generate_educational_report(df, vol_profile)
 
@@ -273,6 +293,7 @@ if start_btn and raw_input:
     if results_for_ranking:
         st.markdown("---")
         st.subheader("🏆 綜合排行")
+        # 手機上用 table 呈現簡單排行，避免複雜
         df_rank = pd.DataFrame(results_for_ranking).sort_values("評分", ascending=False).reset_index(drop=True)
         st.table(df_rank[["代號", "評分", "趨勢"]])
 
