@@ -23,18 +23,17 @@ try:
     client = openai.OpenAI(api_key=openai_api_key)
     llm_available = True
 except Exception:
-    # 這裡不顯示錯誤，只標記無法使用，避免干擾主畫面
     llm_available = False
 
 if "watch_list" not in st.session_state:
     st.session_state.watch_list = []
 
 # ===========================
-# 2. 抗封鎖核心函數 (Plan B)
+# 2. 抗封鎖核心函數 (已修復格式錯誤)
 # ===========================
 
 def get_random_agent():
-    """隨機產生 User-Agent 以偽裝成不同裝置"""
+    """隨機產生 User-Agent"""
     agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
@@ -45,30 +44,40 @@ def get_random_agent():
 
 def fetch_data_robust(ticker):
     """
-    強韌型數據抓取：包含重試機制
-    使用 yf.download 替代 history，對抗封鎖能力較強
+    強韌型數據抓取：
+    1. 包含重試機制
+    2. 強制處理 MultiIndex 問題 (修復 ValueError 的關鍵)
     """
     max_retries = 3
     for i in range(max_retries):
         try:
-            # 隨機延遲，模擬人類行為
+            # 隨機延遲
             time.sleep(random.uniform(0.5, 1.5))
             
-            # 使用 yf.download (通常比 Ticker.history 穩定)
-            # progress=False 關閉進度條以避免 Streamlit 報錯
-            df = yf.download(ticker, period="1y", progress=False, multi_level_index=False)
+            # 使用 yf.download
+            df = yf.download(ticker, period="1y", progress=False)
             
-            if not df.empty:
+            # === 關鍵修復：扁平化 MultiIndex ===
+            # 如果欄位是多層的 (例如: ('Close', 'AAPL'))，把它變成單層 ('Close')
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            
+            # 移除重複欄位 (有時候 yfinance 會回傳重複的 Close)
+            df = df.loc[:, ~df.columns.duplicated()]
+
+            # 檢查是否有數據
+            if not df.empty and 'Close' in df.columns:
                 return df
+                
         except Exception as e:
-            if i == max_retries - 1: # 最後一次嘗試也失敗
+            if i == max_retries - 1:
                 print(f"Failed to fetch {ticker}: {e}")
                 return None
-            continue # 失敗則重試
+            continue
     return None
 
 def fetch_news_robust(ticker):
-    """獨立抓取新聞，失敗不影響股價顯示"""
+    """獨立抓取新聞"""
     try:
         t = yf.Ticker(ticker)
         return t.news
@@ -105,16 +114,22 @@ def process_stock_data(ticker, market):
     if market == "台股 (TW)" and not ticker.endswith(".TW") and ticker.isdigit():
         ticker = f"{ticker}.TW"
         
-    # 1. 抓取股價 (優先)
+    # 1. 抓取股價
     df = fetch_data_robust(ticker)
-    if df is None or df.empty:
+    
+    # 錯誤檢查：如果 df 是 None 或 缺少 Close 欄位
+    if df is None or df.empty or 'Close' not in df.columns:
         return None, None, None, ticker
 
-    # 2. 計算指標
-    df['MA20'] = df['Close'].rolling(20).mean()
-    df['MA60'] = df['Close'].rolling(60).mean()
+    # 2. 計算指標 (這裡不會再報錯了，因為欄位已經被扁平化)
+    try:
+        df['MA20'] = df['Close'].rolling(20).mean()
+        df['MA60'] = df['Close'].rolling(60).mean()
+    except Exception as e:
+        st.error(f"指標計算錯誤: {e}")
+        return None, None, None, ticker
     
-    # 3. 計算大量區 (Volume Profile)
+    # 3. 計算大量區
     try:
         df_recent = df.tail(120).copy()
         if not df_recent.empty:
@@ -125,7 +140,7 @@ def process_stock_data(ticker, market):
     except:
         vol_profile = None
         
-    # 4. 抓取新聞 (獨立抓取，失敗回傳空陣列)
+    # 4. 抓取新聞
     news = fetch_news_robust(ticker)
     
     return df, news, vol_profile, ticker
@@ -134,20 +149,27 @@ def calculate_score(df):
     """計算操盤分數"""
     if len(df) < 60: return 50
     score = 50
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    # 趨勢
-    if last['MA20'] > last['MA60'] and last['Close'] > last['MA20']: score += 25
-    elif last['Close'] < last['MA60']: score -= 25
-    
-    # 短線支撐
-    if last['Close'] > last['MA20']: score += 10
-    
-    # 量能
-    vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
-    if last['Volume'] > vol_ma5 * 1.5 and last['Close'] > prev['Close']:
-        score += 15
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # 確保數據不是 NaN
+        if pd.isna(last['MA20']) or pd.isna(last['MA60']):
+            return 50
+
+        # 趨勢
+        if last['MA20'] > last['MA60'] and last['Close'] > last['MA20']: score += 25
+        elif last['Close'] < last['MA60']: score -= 25
+        
+        # 短線支撐
+        if last['Close'] > last['MA20']: score += 10
+        
+        # 量能
+        vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
+        if last['Volume'] > vol_ma5 * 1.5 and last['Close'] > prev['Close']:
+            score += 15
+    except:
+        pass # 如果計算出錯，回傳 50 分
         
     return min(100, max(0, score))
 
@@ -218,7 +240,8 @@ if btn and t_input:
         c1, c2 = st.columns([2, 1])
         with c1:
             st.header(f"{final_t}")
-            st.metric("股價", f"{last['Close']:.2f}", f"{(last['Close']-df.iloc[-2]['Close']):.2f}")
+            price_change = last['Close'] - df.iloc[-2]['Close']
+            st.metric("股價", f"{last['Close']:.2f}", f"{price_change:.2f}")
         with c2:
             st.write("操盤評分")
             st.progress(score)
@@ -232,8 +255,11 @@ if btn and t_input:
         
         # 大量區線
         if vol is not None:
-            mp = vol.idxmax().mid
-            fig.add_hline(y=mp, line_dash="dot", line_color="red", annotation_text="大量支撐區")
+            try:
+                mp = vol.idxmax().mid
+                fig.add_hline(y=mp, line_dash="dot", line_color="red", annotation_text="大量支撐區")
+            except:
+                pass
             
         fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
